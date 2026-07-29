@@ -2420,6 +2420,106 @@ mod tests {
         Ok(())
     }
 
+    /// Regression test for <https://github.com/n0-computer/iroh/issues/3950>.
+    ///
+    /// Every `RemoteStateActor` span must be a child of the span of the endpoint that owns
+    /// the actor, and never of whatever span happened to be active when the actor was first
+    /// spawned.  Two endpoints in a single process is precisely the case that a single
+    /// global parent span would silently collapse into one tree.
+    #[tokio::test]
+    #[traced_test]
+    async fn remote_state_actor_span_parented_to_endpoint() -> Result {
+        // Two endpoints on the same network, no relay, no Address Lookup.  Each `bind` runs
+        // under its own span so the two endpoint spans are told apart easily when this fails.
+        let ep1 = {
+            let span = info_span!("server");
+            let _guard = span.enter();
+            Endpoint::builder(presets::N0)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await?
+        };
+        let ep2 = {
+            let span = info_span!("client");
+            let _guard = span.enter();
+            Endpoint::builder(presets::N0)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await?
+        };
+        let ep1_id = ep1.id();
+        let ep2_id = ep2.id();
+        let ep1_addr = ep1.addr();
+
+        #[instrument(name = "client", skip_all)]
+        async fn connect(ep: Endpoint, dst: EndpointAddr) -> Result {
+            let conn = ep.connect(dst, TEST_ALPN).await?;
+            let mut send = conn.open_uni().await.anyerr()?;
+            send.write_all(b"hello").await.anyerr()?;
+            send.finish().anyerr()?;
+            conn.closed().await;
+            Ok(())
+        }
+
+        #[instrument(name = "server", skip_all)]
+        async fn accept(ep: Endpoint) -> Result {
+            let conn = ep.accept().await.anyerr()?.await.anyerr()?;
+            let mut recv = conn.accept_uni().await.anyerr()?;
+            let msg = recv.read_to_end(100).await.anyerr()?;
+            assert_eq!(msg, b"hello");
+            Ok(())
+        }
+
+        let ep1_accept = tokio::spawn(accept(ep1.clone()));
+        let ep2_connect = tokio::spawn(connect(ep2.clone(), ep1_addr));
+        ep1_accept.await.anyerr()??;
+        ep2_connect.await.anyerr()??;
+
+        // The span path each endpoint must produce: the actor for the *remote* endpoint sits
+        // under the span of the *local* endpoint that owns it.
+        let ep1_actor = format!(
+            "endpoint{{id={}}}:RemoteStateActor{{remote={}}}",
+            ep1_id.fmt_short(),
+            ep2_id.fmt_short()
+        );
+        let ep2_actor = format!(
+            "endpoint{{id={}}}:RemoteStateActor{{remote={}}}",
+            ep2_id.fmt_short(),
+            ep1_id.fmt_short()
+        );
+
+        // Wait for both to appear rather than sleeping a fixed duration.  This also stops the
+        // assertion below from passing vacuously if no actor span were ever logged at all.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !(logs_contain(&ep1_actor) && logs_contain(&ep2_actor)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .std_context("RemoteStateActor spans did not appear under both endpoint spans")?;
+
+        // And no actor span may show up anywhere else: not under the other endpoint's span,
+        // not as a root, and not under some unrelated span that happened to spawn it.
+        logs_assert(|logs| {
+            for line in logs {
+                if !line.contains("RemoteStateActor{remote=") {
+                    continue;
+                }
+                if !line.contains(&ep1_actor) && !line.contains(&ep2_actor) {
+                    return Err(format!(
+                        "RemoteStateActor span is not parented to its own endpoint span: {line}"
+                    ));
+                }
+            }
+            Ok(())
+        });
+
+        tokio::join!(ep1.close(), ep2.close());
+        Ok(())
+    }
+
     #[tokio::test]
     #[traced_test]
     async fn endpoint_two_relay_only_becomes_direct() -> Result {

@@ -401,7 +401,9 @@ mod tests {
             address_lookup::AddressLookupServices::default(),
             shutdown_token.clone(),
             Arc::new(BiasedRttPathSelector::default()),
-            Span::none(),
+            // Not `Span::none()`: as a parent that means *root*, not *inherit*, which would
+            // detach the actor spans from the test's own span.
+            Span::current(),
         );
         let guards = (watchable, shutdown_token.clone().drop_guard());
         (remote_map, shutdown_token, guards)
