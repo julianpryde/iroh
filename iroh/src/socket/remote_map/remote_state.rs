@@ -215,11 +215,7 @@ impl RemoteStateActor {
         let (tx, rx) = mpsc::channel(16);
         let endpoint_id = self.state.endpoint_id;
 
-        // Ideally we'd use the endpoint span as parent.  We'd have to plug that span into
-        // here somehow.  Instead we have no parent and explicitly set the me attribute.  If
-        // we don't explicitly set a span we get the spans from whatever call happens to
-        // first create the actor, which is often very confusing as it then keeps those
-        // spans for all logging of the actor.
+        // Uses the endpoint span as the parent
         tasks.spawn(
             self.run(initial_msgs, rx, shutdown_token)
                 .instrument(info_span!(
