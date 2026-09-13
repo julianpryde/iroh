@@ -21,7 +21,9 @@ use crate::endpoint::RelayStatus;
 
 mod actor;
 
-pub(crate) use self::actor::{Config as RelayActorConfig, HomeRelayWatch, RelayConnectionState};
+pub(crate) use self::actor::{
+    Config as RelayActorConfig, HomeRelayWatch, RelayConnectionFailure, RelayConnectionState,
+};
 use self::actor::{RelayActor, RelayActorMessage, RelayRecvDatagram, RelaySendItem};
 
 type RelayAddrWatcher =
@@ -277,6 +279,17 @@ pub(crate) struct RelaySender {
 }
 
 impl RelaySender {
+    #[cfg(test)]
+    pub(crate) fn bounded_for_test(capacity: usize) -> (Self, mpsc::Receiver<RelaySendItem>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (
+            Self {
+                sender: PollSender::new(sender),
+            },
+            receiver,
+        )
+    }
+
     pub(super) fn is_valid_send_addr(&self, _url: &RelayUrl, _endpoint_id: &EndpointId) -> bool {
         true
     }

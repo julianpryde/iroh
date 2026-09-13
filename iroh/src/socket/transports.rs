@@ -36,7 +36,7 @@ pub(crate) use self::ip::Config as IpConfig;
 #[cfg(not(wasm_browser))]
 use self::ip::{IpNetworkChangeSender, IpTransports, IpTransportsSender};
 pub(crate) use self::relay::{
-    HomeRelayWatch, RelayActorConfig, RelayConnectionState, RelayTransport,
+    HomeRelayWatch, RelayActorConfig, RelayConnectionFailure, RelayConnectionState, RelayTransport,
 };
 
 /// How many times all transports may error on `poll_recv` before we give up.
@@ -961,6 +961,43 @@ pub(crate) struct TransportsSender {
 }
 
 impl TransportsSender {
+    #[cfg(all(test, not(wasm_browser)))]
+    pub(crate) fn bind_loopback_for_test(&mut self) {
+        self.ip = IpTransports::bind(
+            [ip::Config::V4 {
+                ip_net: "127.0.0.1/32".parse().unwrap(),
+                port: 0,
+                is_required: true,
+                is_default: true,
+            }]
+            .into_iter(),
+            &EndpointMetrics::default(),
+        )
+        .unwrap()
+        .create_sender();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_bounded_relay_for_test(
+        capacity: usize,
+    ) -> (Self, impl futures_util::Stream<Item = ()> + Unpin) {
+        use futures_util::StreamExt;
+        let (sender, receiver) = RelaySender::bounded_for_test(capacity);
+        let sender = Self {
+            #[cfg(not(wasm_browser))]
+            ip: IpTransports::bind(std::iter::empty(), &EndpointMetrics::default())
+                .expect("empty transports must bind")
+                .create_sender(),
+            relay: vec![sender],
+            custom: Vec::new(),
+            max_transmit_segments: NonZeroUsize::new(1).unwrap(),
+        };
+        (
+            sender,
+            tokio_stream::wrappers::ReceiverStream::new(receiver).map(|_| ()),
+        )
+    }
+
     #[instrument(name = "poll_send", skip(self, cx, transmit), fields(len = transmit.contents.len()))]
     pub(crate) fn poll_send(
         mut self: Pin<&mut Self>,
